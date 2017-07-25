@@ -1,7 +1,7 @@
-#! python3.5
+#! python3.6
 
 import numpy as np
-import tensorflow as tf
+# import tensorflow as tf
 import NeuralNetwork as ann
 
 

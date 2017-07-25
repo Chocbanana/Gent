@@ -16,28 +16,78 @@ from collections import namedtuple
 
 
 
-BaseGene = namedtuple("BaseGene", ["gid", "ntype", "input", "output"])
+# TODO: docstrings for namedtuples in the form
+# Gene.__doc__ = ": "
+# Gene.field.__doc__ = " "
+
+
+# class BaseGene(object):
+#     __slots__ = ("gid", "ntype", "d_in", "d_out")
+#
+#     def __init__(self, **kwargs):
+#         for k, v in kwargs.items():
+#             setattr(self, k, v)
+#
+# class NNInputGene(BaseGene):
+#     __slots__ = ()
+#
+#     def __init__(self, **kwargs):
+#         super(NNInputGene, self).__init__(**kwargs)
+#
+# class NNOutputGene(BaseGene):
+#     __slots__ = ("activation",)
+#
+#     def __init__(self, activation=None, **kwargs):
+#         super(NNOutputGene, self).__init__(activation, **kwargs)
+
+
+BaseGene = namedtuple("BaseGene", ["gid", "ntype", "d_in", "d_out"])
 
 NNInputGene = namedtuple("NNInputGene", BaseGene._fields)
+
 NNOutputGene = namedtuple("NNOutputGene", BaseGene._fields + ("activation",))
 NNOutputGene.__new__.__defaults__ = (None,)
-ConvGene = namedtuple("ConvGene", BaseGene._fields + ("dim_filter", "activation", "stride"))
+
+ConvGene = namedtuple("ConvGene", BaseGene._fields + ("d_filter", "activation", "stride"))
 ConvGene.__new__.__defaults__ = (None, [1, 1, 1, 1])
-PoolGene = namedtuple("PoolGene", BaseGene._fields + ("dim_kernel", "dim_in", "dim_out", "activation", "stride", "padding"))
+
+PoolGene = namedtuple("PoolGene", BaseGene._fields + ("d_kernel", "activation", "stride", "padding"))
 PoolGene.__new__.__defaults__ = (None, [1, 1, 1, 1], 0)
-LinearGene = namedtuple("LinearGene", BaseGene._fields + ("dim_in", "dim_out", "activation"))
+
+LinearGene = namedtuple("LinearGene", BaseGene._fields + ("activation",))
 LinearGene.__new__.__defaults__ = (None,)
 
-NodeTypes = {"nn_in": NNInputGene, "nn_out": NNOutputGene, "conv": ConvGene
-            , "recurrent": None, "maxpool": PoolGene, "avgpool": PoolGene
-            , "lin": LinearGene}
+RnnGene = namedtuple("RnnGene", BaseGene._fields + ("d_hidden", "num_layers", "nonlin", "bidir"))
+RnnGene.__new__.__defaults__ = (1, "tanh", False)
+
+NodeTypes = {
+            "nn_in": NNInputGene, "nn_out": NNOutputGene, "conv": ConvGene
+            , "maxpool": PoolGene, "avgpool": PoolGene, "lin": LinearGene
+            , "rnn": RnnGene, "lstm": RnnGene, "gru": RnnGene
+            }
+GeneTypes = tuple(set(NodeTypes.values()))
+
 
 allnodes = list(NodeTypes.keys())
 
 
+# class NNGene(object):
+#     def __init__(self, params):
+
+
+
+
+# Will be a graph
+# TODO: genotype will handle:
+#     - checking that all have appropriate in/outputs
+#         - if in/output not given, can infer from connected
+#     - assigning unique nids (different from gid, which identifies.... something unique)
+#         - TODO: still need to decide if gid applies jsut to ntype, or also params
+#         - also including in/output is isomorphism, since is determined by connections and gid
 class NNGenotype:
 
     def __init__(self, genes):
+        pass
 
         
 
@@ -51,15 +101,62 @@ class Allow(Enum):
 #             , "nn_out": {"output": (Allow.only, []), "input": (Allow.allOf)}
 #             , "conv": }
 
-class NNGene:
-    # genespace = [("ntype", allnodes), (["input", "output"], NNGenome.GID[])]
-
-    def check_correctness(kwargs):
-        pass
-
-    def make_gene(args):
-        if (self.check_correctness(args)):
-            return args[1](args)
+# class NNGene:
+#     # genespace = [("ntype", allnodes), (["input", "output"], NNGenome.GID[])]
+#
+#     def check_correctness(self, kwargs):
+#         pass
+#
+#     def make_gene(self, args):
+#         if (self.check_correctness(args)):
+#             return args[1](args)
 
 class NNGenome:
-    
+
+    def __init__(self, genes=None):
+        # Indexed by gid
+        self.allGenes = {}
+        self.counter = 1
+
+        if genes:
+            if isinstance(genes, (list, tuple)):
+                for g in genes: self.new_gene(g)
+            else:
+                self.new_gene(genes)
+
+    # def make_gene(self, params):
+    #     if params["ntype"] not in NodeTypes:
+    #         raise ValueError("The given ntype {} is not allowed".format(params["ntype"]))
+    #
+    #     if "gid" not in params or params["gid"] in self.allGenes:
+    #         params["gid"] = self._new_gid()
+    #
+    #     newgene = NodeTypes[params["ntype"]](**params)
+    #     self.allGenes[gid] = newgene
+    #
+    #     return newgene
+
+    def new_gene(self, gene):
+        if gene["ntype"] not in NodeTypes:
+            raise ValueError("The given ntype {} is not allowed".format(gene["ntype"]))
+
+        if "gid" not in gene or gene["gid"] in self.allGenes:
+            gene["gid"] = self._new_gid()
+
+        if isinstance(gene, dict):
+            self.allGenes[gene["gid"]] = NodeTypes[params["ntype"]](**gene)
+        elif isinstance(gene, (list, tuple)):
+            self.allGenes[gene["gid"]] = NodeTypes[params["ntype"]](*gene)
+
+        return self.allGenes[gene["gid"]]
+
+
+    def _new_gid(self):
+        while self.counter in self.allGenes:
+            self.counter += 1
+
+        return self.counter
+
+    #
+    # {"d_in": (3, 4, 11), "activation": "relu"}
+    # [([1], []), ([2], [0])]
