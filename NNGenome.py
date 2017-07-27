@@ -48,22 +48,26 @@ NNInputGene = namedtuple("NNInputGene", BaseGene._fields)
 NNOutputGene = namedtuple("NNOutputGene", BaseGene._fields + ("activation",))
 NNOutputGene.__new__.__defaults__ = (None,)
 
-ConvGene = namedtuple("ConvGene", BaseGene._fields + ("d_filter", "activation", "stride"))
-ConvGene.__new__.__defaults__ = (None, [1, 1, 1, 1])
+ConvGene = namedtuple("ConvGene", BaseGene._fields + ("d_filter", "activation", "stride", "dropout"))
+ConvGene.__new__.__defaults__ = (None, [1, 1, 1, 1], False)
 
-PoolGene = namedtuple("PoolGene", BaseGene._fields + ("d_kernel", "activation", "stride", "padding"))
-PoolGene.__new__.__defaults__ = (None, [1, 1, 1, 1], 0)
+PoolGene = namedtuple("PoolGene", BaseGene._fields + ("d_kernel", "activation", "stride", "padding", "dropout"))
+PoolGene.__new__.__defaults__ = (None, [1, 1, 1, 1], 0, False)
 
-LinearGene = namedtuple("LinearGene", BaseGene._fields + ("activation",))
-LinearGene.__new__.__defaults__ = (None,)
+LinearGene = namedtuple("LinearGene", BaseGene._fields + ("activation", "dropout"))
+LinearGene.__new__.__defaults__ = (None, False)
 
-RnnGene = namedtuple("RnnGene", BaseGene._fields + ("d_hidden", "num_layers", "nonlin", "bidir"))
+RnnGene = namedtuple("RnnGene", BaseGene._fields + ("d_hidden", "d_batch", "num_layers", "nonlin", "bidir"))
 RnnGene.__new__.__defaults__ = (1, "tanh", False)
+
+EmbedGene = namedtuple("EmbedGene", BaseGene._fields + ("d_embed", "dropout"))
+EmbedGene.__new__.__defaults__ = (False,)
 
 NodeTypes = {
             "nn_in": NNInputGene, "nn_out": NNOutputGene, "conv": ConvGene
             , "maxpool": PoolGene, "avgpool": PoolGene, "lin": LinearGene
             , "rnn": RnnGene, "lstm": RnnGene, "gru": RnnGene
+            , "embed": EmbedGene
             }
 GeneTypes = tuple(set(NodeTypes.values()))
 
@@ -144,9 +148,9 @@ class NNGenome:
             gene["gid"] = self._new_gid()
 
         if isinstance(gene, dict):
-            self.allGenes[gene["gid"]] = NodeTypes[params["ntype"]](**gene)
+            self.allGenes[gene["gid"]] = NodeTypes[gene["ntype"]](**gene)
         elif isinstance(gene, (list, tuple)):
-            self.allGenes[gene["gid"]] = NodeTypes[params["ntype"]](*gene)
+            self.allGenes[gene["gid"]] = NodeTypes[gene["ntype"]](*gene)
 
         return self.allGenes[gene["gid"]]
 

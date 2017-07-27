@@ -5,6 +5,7 @@ Author: Bhavana Jonnalagadda, 2017
 """
 
 import math
+import pickle
 from typing import *
 import numpy as np
 
@@ -13,6 +14,7 @@ import NNGenome as gn
 
 
 import torch, torch.optim
+import torch.autograd
 from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,7 +84,7 @@ class NetworkNode(nn.Module):
 class NetworkInput(NetworkNode):
     def __init__(self, gene, output_list=()):
         super(NetworkInput, self).__init__(gene, output_list=output_list)
-        self.node = Variable
+        self.node = lambda x: x
 
     def forward(self, input=None):
         if (input is not None) and (self.result is None):
@@ -109,14 +111,14 @@ class NetworkOutput(NetworkNode):
         # self.biasvar = tf.Variable(tf.constant([1.0]))
         # self.biasvar2 = tf.Variable(tf.constant([1.0]))
         if self.G.activation is None:
-            self.node = Variable
+            self.node = lambda x: x
         else:
             self.node = getattr(F, self.G.activation)
 
 
     def forward(self, input=None):
         if (input is not None) and (self.result is None):
-            self.result = self.node(input)
+            self.result = self.node(input).view(*self.G.d_out)
 
         # Pull the input from previous network layers
         elif self.result is None:
@@ -126,7 +128,7 @@ class NetworkOutput(NetworkNode):
 
             # Concatenate input along the 3rd dim
             # TODO: make concatenation on a given dim or default last dim
-            self.result = self.node(torch.cat(in_result, 2))
+            self.result = self.node(torch.cat(in_result, 2)).view(*self.G.d_out)
 
         return self.result
 
@@ -231,38 +233,76 @@ class FullyConnected(NetworkNode):
     def __init__(self, gene, input_list=(), output_list=()):
         super(FullyConnected, self).__init__(gene, input_list, output_list)
 
-        # if input_list: self.add_input(input_list)
-        # if output_list: self.add_output(output_list)
+        self.node = nn.Linear(self.G.d_in[-1], self.G.d_out)
+
+        if self.G.activation:
+            self.act = getattr(nn, self.G.activation)()
+        else:
+            self.act = lambda x: x
+
+        if self.G.dropout:
+            self.drop = nn.Dropout()
+        else:
+            self.drop = lambda x: x
+
 
     def forward(self, input=None):
-            pass
-    # def _build_tensor(self):
-    #     if not self.input:
-    #         return None
-    #     elif len(self.input) == 1:
-    #         self.input_tensor = self.input[0].tensor
-    #     else:
-    #         self.input_tensor = tf.concat(axis=2, values=[n.tensor for n in self.input])
-    #
-    #     # NOTE: n_dim MUST BE THE same as a1 x a2 x ... where [a0...an] are the
-    #     # dimensions of the input
-    #     self.n = self.gene["n_dim"]
-    #     self.m = self.gene["m_dim"]
-    #
-    #     self.weights = tf.Variable(tf.random_normal([self.n * len(self.input), self.m]))
-    #     self.biasvar = tf.Variable(tf.constant([0.1], shape=[self.m]))
-    #
-    #     del self.tensor
-    #     # NOTE: Reduces to -1 x m
-    #     if "activation" in self.gene and self.gene["activation"] is not None:
-    #         self.tensor = self.gene["activation"](self._matmul2d(self.input_tensor, self.weights, self.biasvar))
-    #     else:
-    #         self.tensor = self._matmul2d(self.input_tensor, self.weights, self.biasvar)
-    #
-    #     for node in self.output: node.add_input([self])
-    #
-    # def _matmul2d(self, a, b, c):
-    #     return tf.matmul(tf.reshape(a, [-1, self.n * len(self.input)]), b) + c
+        """
+
+        :param input: dim = (n x d_in)
+        :return: output dim = (n x d_out)
+        """
+        if (input is not None) and (self.result is None):
+
+            self.result = self.act(self.drop(self.node(input.view(*self.G.d_in)))).view(input.size()[:-1], self.G.d_out)
+
+        # Pull the input from previous network layers
+        elif self.result is None:
+            in_result = []
+            for n in self.input:
+                in_result.append(n())
+
+            input = torch.cat(in_result, 0)
+            # Concatenate input along the dim "n"
+            self.result = self.act(self.drop(self.node(input.view(*self.G.d_in)))).view(*list(input.size()[:-1]), self.G.d_out)
+
+        return self.result
+
+
+
+
+class Embed(NetworkNode):
+
+    def __init__(self, gene, input_list=(), output_list=()):
+        super(Embed, self).__init__(gene, input_list, output_list)
+
+        self.node = nn.Embedding(self.G.d_embed, self.G.d_out)
+
+        if self.G.dropout:
+            self.drop = nn.Dropout()
+        else:
+            self.drop = lambda x: x
+
+    def forward(self, input=None):
+        """
+
+        :param input: dim = (n x m)
+        :return: output dim = (n x m x d_out)
+        """
+        if (input is not None) and (self.result is None):
+            self.result = self.drop(self.node(input))
+
+        # Pull the input from previous network layers
+        elif self.result is None:
+            in_result = []
+            for n in self.input:
+                in_result.append( n() )
+
+            # Concatenate input along the dim "m"
+            self.result = self.drop(self.node(torch.cat(in_result, 1)))
+
+
+        return self.result
 
 
 class Recurrent(NetworkNode):
@@ -274,21 +314,23 @@ class Recurrent(NetworkNode):
 
         dim = self.G.num_layers if not self.G.bidir else self.G.num_layers * 2
 
-        # TODO: dont assume batch size = 1 (?)
-        self.hidden = Variable(torch.zeros(1, dim, self.G.d_hidden))
+        self.hidden = Variable(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
         if self.G.ntype == "lstm":
-            self.state = Variable(torch.zeros(1, dim, self.G.d_hidden))
+            self.state = Variable(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
 
         if self.G.ntype == "rnn":
             self.node = Recurrent.types["rnn"](self.G.d_in, self.G.d_hidden, self.G.num_layers, self.G.nonlin,
-                                     batch_first=True, bidirectional=self.G.bidir)
+                                     bidirectional=self.G.bidir)
         else:
-            self.node = Recurrent.types["rnn"](self.G.d_in, self.G.d_hidden, self.G.num_layers, self.G.nonlin,
-                                     batch_first=True, bidirectional=self.G.bidir)
-
-
+            self.node = Recurrent.types[self.G.ntype](self.G.d_in, self.G.d_hidden, self.G.num_layers,
+                                     bidirectional=self.G.bidir)
 
     def forward(self, input=None):
+        """
+
+        :param input:
+        :return: output dim = (n x m x d_hidden*dirs{1, 2})
+        """
         if (input is not None) and (self.result is None):
             if self.G.ntype == "lstm":
                 self.result, self.hidden, self.state = self.node(input, self.hidden, self.state)
@@ -315,7 +357,8 @@ class NeuralNetwork(nn.Module):
     NodeTypes = {
                 "nn_in": NetworkInput, "nn_out": NetworkOutput
                 # , "conv": ConvLayer
-                # , "maxpool": MaxPool, "avgpool": MaxPool, "lin": FullyConnected
+                # , "maxpool": MaxPool, "avgpool": MaxPool,
+                , "lin": FullyConnected, "embed": Embed
                 , "rnn": Recurrent, "lstm": Recurrent, "gru": Recurrent
                 }
 
@@ -326,7 +369,7 @@ class NeuralNetwork(nn.Module):
         super(NeuralNetwork, self).__init__()
 
         self.genes = []
-        self.nodes = []
+        self.nodes = nn.ModuleList()
         self.input_nodes = []
         self.output_nodes = []
 
@@ -399,62 +442,146 @@ class NeuralNetwork(nn.Module):
 #         pass
 
 class NetworkRunner:
+    errtypes = {
+                "avg_err": (lambda x: torch.mean(x)),
+                "perplexity": (lambda x: math.exp(x))
+               }
+
 
     # TODO: make test data optional
-    def __init__(self, xtr, ytr, xte, yte):
+    def __init__(self, network , xtr, ytr, xte, yte, seq=False):
 
+        self.network = network
         self.x_train = xtr
         self.y_train = ytr
         self.x_test = xte
         self.y_test = yte
+        self.seq = seq
 
-    def eval(self, network, gen, species):
-        return self.train_network(network, "/gen" + str(gen) + "/sp" + str(species))
+    def evaluate(self, data, data_y=None, criterion=None):
+        self.network.eval()
+        result = self.network(data)
+        if data_y:
+            loss = criterion(result, data_y)
+        self.network.train()
 
-    def train_network(self, network, epochs=50, batch_size=10, learn_rate=0.0005,
-                      loss="MSELoss", opt="SGD", err=None, dir=None):
+        if data_y:
+            return result, loss.data[0]
+        else:
+            return result
+
+    def train(self, epochs=50, batch_size=30, learn_rate=0.0005,
+                      lossfcn="MSELoss", opt="SGD", err="avg_err", clipgrad=0.25, interval=50, path=None):
+
+        self.network.train()
+
+        # Enable GPU optimization
+        # if torch.cuda.is_available():
+        #     self.network.cuda()
 
         # Set hyperparameters
-        error = err if err else (lambda a, b: torch.mean(a - b))
-        criterion = getattr(nn, loss)
-        optimizer = getattr(torch.optim, opt)(network.parameters(), lr=learn_rate)
+        criterion = getattr(nn, lossfcn)()
+        optimizer = getattr(torch.optim, opt)(self.network.parameters(), lr=learn_rate)
         b = batch_size
 
-        for e in range(epochs):
-            # create batches
-            inds = np.random.permutation(range(len(self.x_train)))
-            batches = [inds[i:i + b] for i in range(0, len(inds), b) if i + b < len(inds)]
+        data = {}
+        for d in ['output', "loss", "err"]:
+            data[d] = []
+        stats_per_epoch = []
 
-            for i in range(len(batches)):
-                x_ = Variable(self.x_train[batches[i], :])
-                y_ = Variable(self.y_train[batches[i], :])
+        try:
+            for e in range(epochs):
+                # create batches (of random data points if not a sequence)
+                if self.seq:
+                    batches = [slice(i, i+b) for i in range(0, self.x_train.size(0) - 1, b) if i + b < len(self.x_train)]
+                else:
+                    inds = np.random.permutation(range(len(self.x_train)))
+                    batches = [torch.LongTensor(inds[i:(i + b)]) for i in range(0, len(inds), b) if i + b < len(inds)]
 
-                # Run and evaluate the network
-                y_pred = network(x_)
-                loss = criterion(y_pred, y_)
+                stats = {}
+                stats["loss"] = [0]
+                stats[err] = []
+                for i in range(len(batches)):
+                    x_ = Variable(self.x_train[batches[i]])
+                    y_ = Variable(self.y_train[batches[i]]).view(-1)
 
-                print(loss.data[0])
+                    # Run and evaluate the network
+                    y_pred = self.network(x_)
+                    loss = criterion(y_pred, y_)
 
-                # Before the backward pass, use the optimizer object to zero all of the
-                # gradients for the variables it will update (which are the learnable weights
-                # of the model)
-                network.zero_grad()
+                    # Save stats
+                    stats["loss"][-1] += loss.data[0]
 
-                # Backward pass: compute gradient of the loss with respect to model
-                # parameters
-                loss.backward()
+                    # Before the backward pass, use the optimizer object to zero all of the
+                    # gradients for the variables it will update (which are the learnable weights
+                    # of the model)
+                    self.network.zero_grad()
 
-                # Update weights of the network
-                optimizer.step()
+                    # Backward pass: compute gradient of the loss with respect to model
+                    # parameters
+                    loss.backward(retain_variables=True)
 
-            # print("epoch: %d  loss: %f error: %f  corr: %f  \n" % (e, stats[0], stats[1], float(corr)))
+                    # Reduce exploding gradient problem
+                    if clipgrad:
+                        nn.utils.clip_grad_norm(self.network.parameters(), clipgrad)
+
+                    # Update weights of the network
+                    optimizer.step()
+
+                    # Report and save performance
+                    if i % interval == 0:
+                        # Save stats
+                        stats["loss"][-1] = stats["loss"][-1] / interval
+                        if err == "perplexity":
+                            stats[err].append(math.exp(stats["loss"][-1]))
+                        elif err == "avg_err":
+                            stats[err].append(torch.mean(y_pred - y_))
+
+
+                        print("Epoch: {}\t Batch: {}/{}\t Loss: {}\t {}: {}\t".format(
+                                e, i, len(batches), stats["loss"][-1], err, stats[err][-1]))
+
+                        stats["loss"].append(0)
+
+            # Save stats
+            y_pred, loss = self.evaluate(self.x_test, self.y_test, criterion)
+            if err == "perplexity":
+                error = math.exp(loss)
+            elif err == "avg_err":
+                error = torch.mean(y_pred - self.y_test)
+            stats_per_epoch.append(stats)
+            data["output"].append(y_pred)
+            data["loss"].append(loss)
+            data["err"].append(error)
+
+            # Report on test data
+            print("Epoch: {}\t Loss: {}\t {}: {}\t".format(e, loss, err, error))
+
+        except KeyboardInterrupt:
+            print("Quitting from interrupt")
+
+            stats["loss"][-1] = stats["loss"][-1] / (interval if i % interval == 0 else i % interval)
+            if err == "perplexity":
+                            stats[err].append(math.exp(stats["loss"][-1]))
+                        elif err == "avg_err":
+                            stats[err].append(torch.mean(y_pred - y_))
+            stats_per_epoch.append(stats)
+            
+            if path: self._save_data(path, model=self.network, data=data, stats_per_epoch=stats_per_epoch)
+            print("Finished saving")
+
+        # Save all to file
+        if path: self._save_data(path, model=self.network, data=data, stats_per_epoch=stats_per_epoch)
 
 
 
 
-    # def _create_writers(self, output, loss, error):
-    #
-    #     output_summary = tf.summary.histogram('generated_spike_train', output)
-    #     loss_summary = tf.summary.scalar('p_loss', tf.reduce_mean(loss))
-    #     err_summary = tf.summary.scalar('mse_error', error)
-    #     return tf.summary.merge([output_summary, loss_summary, err_summary])
+    def _save_data(self, path, **kwargs):
+        print("Saving to {}".format(path))
+        for key, value in kwargs.items():
+            with open(path + key, 'wb') as file:
+                if key == "model":
+                    torch.save(value.state_dict(), file)
+                else:
+                    pickle.dump(value, file)
+                print("Saved {}".format(key))
