@@ -6,6 +6,7 @@ Author: Bhavana Jonnalagadda, 2017
 
 import math
 import pickle
+import random
 from typing import *
 import numpy as np
 
@@ -254,7 +255,7 @@ class FullyConnected(NetworkNode):
         """
         if (input is not None) and (self.result is None):
 
-            self.result = self.act(self.drop(self.node(input.view(*self.G.d_in)))).view(input.size()[:-1], self.G.d_out)
+            self.result = self.act(self.drop(self.node(input.view(*self.G.d_in)))).view(*list(input.size()[:-1]), self.G.d_out)
 
         # Pull the input from previous network layers
         elif self.result is None:
@@ -448,15 +449,26 @@ class NetworkRunner:
                }
 
 
-    # TODO: make test data optional
-    def __init__(self, network , xtr, ytr, xte, yte, seq=False):
+    # TODO: remove assumption that data is in pytorch form
+    def __init__(self, network , xtr, ytr, xte=None, yte=None, seq=False):
 
         self.network = network
-        self.x_train = xtr
-        self.y_train = ytr
-        self.x_test = xte
-        self.y_test = yte
+
+        if xte is not None:
+            self.x_train = xtr
+            self.y_train = ytr
+            self.x_test = xte
+            self.y_test = yte
+        else:
+            self.x_train, self.y_train, self.x_test, self.y_test = self._make_test_data(xtr, ytr)
         self.seq = seq
+
+    def _make_test_data(self, data_x, data_y, amount=10):
+        """
+        amount: the amount to divide by (the percent of data that will be test)
+        """
+        num = len(data_x) // amount
+        return data_x[num:], data_y[num:], data_x[:num], data_y[:num]
 
     def evaluate(self, data, data_y=None, criterion=None):
         self.network.eval()
@@ -502,8 +514,11 @@ class NetworkRunner:
                 stats["loss"] = [0]
                 stats[err] = []
                 for i in range(len(batches)):
+                    # x_ = Variable(self.x_train[batches[i]]).cuda()
+                    # y_ = Variable(self.y_train[batches[i]]).view(-1).cuda()
                     x_ = Variable(self.x_train[batches[i]])
-                    y_ = Variable(self.y_train[batches[i]]).view(-1)
+                    y_ = Variable(self.y_train[batches[i]]).squeeze()
+                    # TODO: dimensions issue of y_
 
                     # Run and evaluate the network
                     y_pred = self.network(x_)
@@ -528,14 +543,16 @@ class NetworkRunner:
                     # Update weights of the network
                     optimizer.step()
 
-                    # Report and save performance
+                    # Report and save performance for batch interval
                     if i % interval == 0:
                         # Save stats
                         stats["loss"][-1] = stats["loss"][-1] / interval
                         if err == "perplexity":
                             stats[err].append(math.exp(stats["loss"][-1]))
                         elif err == "avg_err":
-                            stats[err].append(torch.mean(y_pred - y_))
+                            stats[err].append(torch.mean(y_pred - y_).data[0])
+
+                        if path: self._save_data(path+"checkpoints/{}-{}-".format(e, i), stats=stats)
 
 
                         print("Epoch: {}\t Batch: {}/{}\t Loss: {}\t {}: {}\t".format(
@@ -543,45 +560,53 @@ class NetworkRunner:
 
                         stats["loss"].append(0)
 
-            # Save stats
-            y_pred, loss = self.evaluate(self.x_test, self.y_test, criterion)
-            if err == "perplexity":
-                error = math.exp(loss)
-            elif err == "avg_err":
-                error = torch.mean(y_pred - self.y_test)
-            stats_per_epoch.append(stats)
-            data["output"].append(y_pred)
-            data["loss"].append(loss)
-            data["err"].append(error)
 
-            # Report on test data
-            print("Epoch: {}\t Loss: {}\t {}: {}\t".format(e, loss, err, error))
+                # Save stats for epoch
+                y_pred, loss = self.evaluate(self.x_test, self.y_test, criterion)
+                if err == "perplexity":
+                    error = math.exp(loss)
+                elif err == "avg_err":
+                    error = torch.mean(y_pred - self.y_test).data[0]
+                stats_per_epoch.append(stats)
+                data["output"].append(y_pred)
+                data["loss"].append(loss)
+                data["err"].append(error)
+
+                if path: self._save_data(path+"checkpoints/{}-{}-".format(e, i), data=data, stats_per_epoch=stats_per_epoch, model=self.network)
+
+                # Report on test data
+                print("Epoch: {}\t Loss: {}\t {}: {}\t".format(e, loss, err, error))
+
+
+            # Save all to file after all epochs
+            print("Saving to {}".format(path))
+            if path: self._save_data(path, model=self.network, data=data, stats_per_epoch=stats_per_epoch)
 
         except KeyboardInterrupt:
             print("Quitting from interrupt")
 
             stats["loss"][-1] = stats["loss"][-1] / (interval if i % interval == 0 else i % interval)
             if err == "perplexity":
-                            stats[err].append(math.exp(stats["loss"][-1]))
-                        elif err == "avg_err":
-                            stats[err].append(torch.mean(y_pred - y_))
+                stats[err].append(math.exp(stats["loss"][-1]))
+            elif err == "avg_err":
+                stats[err].append(torch.mean(y_pred - y_).data[0])
             stats_per_epoch.append(stats)
             
-            if path: self._save_data(path, model=self.network, data=data, stats_per_epoch=stats_per_epoch)
+            print("Saving to {}".format(path))
+            if path: self._save_data(path+"interrupt/", model=self.network, data=data, stats_per_epoch=stats_per_epoch)
             print("Finished saving")
 
-        # Save all to file
-        if path: self._save_data(path, model=self.network, data=data, stats_per_epoch=stats_per_epoch)
+        
 
 
 
 
     def _save_data(self, path, **kwargs):
-        print("Saving to {}".format(path))
+        
         for key, value in kwargs.items():
             with open(path + key, 'wb') as file:
                 if key == "model":
                     torch.save(value.state_dict(), file)
                 else:
                     pickle.dump(value, file)
-                print("Saved {}".format(key))
+                # print("Saved {}".format(key))
