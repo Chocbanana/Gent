@@ -319,6 +319,11 @@ class Recurrent(NetworkNode):
         if self.G.ntype == "lstm":
             self.state = Variable(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
 
+        # Enable GPU optimization
+        if torch.cuda.is_available():
+            self.hidden = self.hidden.cuda()
+            if self.G.ntype == "lstm": self.state = self.state.cuda()
+
         if self.G.ntype == "rnn":
             self.node = Recurrent.types["rnn"](self.G.d_in, self.G.d_hidden, self.G.num_layers, self.G.nonlin,
                                      bidirectional=self.G.bidir)
@@ -488,8 +493,8 @@ class NetworkRunner:
         self.network.train()
 
         # Enable GPU optimization
-        # if torch.cuda.is_available():
-        #     self.network.cuda()
+        if torch.cuda.is_available():
+            self.network.cuda()
 
         # Set hyperparameters
         criterion = getattr(nn, lossfcn)()
@@ -514,11 +519,14 @@ class NetworkRunner:
                 stats["loss"] = [0]
                 stats[err] = []
                 for i in range(len(batches)):
-                    # x_ = Variable(self.x_train[batches[i]]).cuda()
-                    # y_ = Variable(self.y_train[batches[i]]).view(-1).cuda()
                     x_ = Variable(self.x_train[batches[i]])
                     y_ = Variable(self.y_train[batches[i]]).squeeze()
                     # TODO: dimensions issue of y_
+
+                    # Enable GPU optimization
+                    if torch.cuda.is_available():
+                        x_ = x_.cuda()
+                        y_ = y_.cuda()
 
                     # Run and evaluate the network
                     y_pred = self.network(x_)
