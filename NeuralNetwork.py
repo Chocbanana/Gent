@@ -3,7 +3,7 @@
 """
 Author: Bhavana Jonnalagadda, 2017
 """
-
+import os
 import math
 import pickle
 import random
@@ -30,6 +30,13 @@ TODO: Later (NOT NOW!!) :
 - Documentation (properly formatted, meaning triple quote docs after class/fcns and sameline for variables)
 """
 
+def _var(tensor):
+    # Enable GPU optimization
+    if torch.cuda.is_available():
+        return Variable(tensor).cuda()
+
+    else:
+        return Variable(tensor)
 
 
 # TODO: IMP redo for new "same" gene structure ie no recursive updating for output
@@ -315,14 +322,14 @@ class Recurrent(NetworkNode):
 
         dim = self.G.num_layers if not self.G.bidir else self.G.num_layers * 2
 
-        self.hidden = Variable(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
+        self.hidden = _var(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
         if self.G.ntype == "lstm":
-            self.state = Variable(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
+            self.state = _var(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
 
-        # Enable GPU optimization
-        if torch.cuda.is_available():
-            self.hidden = self.hidden.cuda()
-            if self.G.ntype == "lstm": self.state = self.state.cuda()
+        # # Enable GPU optimization
+        # if torch.cuda.is_available():
+        #     self.hidden = self.hidden.cuda()
+        #     if self.G.ntype == "lstm": self.state = self.state.cuda()
 
         if self.G.ntype == "rnn":
             self.node = Recurrent.types["rnn"](self.G.d_in, self.G.d_hidden, self.G.num_layers, self.G.nonlin,
@@ -337,6 +344,8 @@ class Recurrent(NetworkNode):
         :param input:
         :return: output dim = (n x m x d_hidden*dirs{1, 2})
         """
+
+        self._repackage()
         if (input is not None) and (self.result is None):
             if self.G.ntype == "lstm":
                 self.result, self.hidden, self.state = self.node(input, self.hidden, self.state)
@@ -358,6 +367,16 @@ class Recurrent(NetworkNode):
         return self.result
 
 
+    def _repackage(self):
+        """Wraps hidden states in new Variables, to detach them from their history."""
+        self.hidden = _var(self.hidden.data)
+        if self.G.ntype == "lstm":
+            self.state = _var(self.state.data)
+
+        # # Enable GPU optimization
+        # if torch.cuda.is_available():
+        #     self.hidden = self.hidden.cuda()
+        #     if self.G.ntype == "lstm": self.state = self.state.cuda()
 
 class NeuralNetwork(nn.Module):
     NodeTypes = {
@@ -455,9 +474,11 @@ class NetworkRunner:
 
 
     # TODO: remove assumption that data is in pytorch form
-    def __init__(self, network , xtr, ytr, xte=None, yte=None, seq=False):
+    def __init__(self, network , xtr, ytr, xte=None, yte=None, seq=False, dropout=False):
 
         self.network = network
+        self.dropout = dropout
+        self.seq = seq
 
         if xte is not None:
             self.x_train = xtr
@@ -466,7 +487,7 @@ class NetworkRunner:
             self.y_test = yte
         else:
             self.x_train, self.y_train, self.x_test, self.y_test = self._make_test_data(xtr, ytr)
-        self.seq = seq
+        
 
     def _make_test_data(self, data_x, data_y, amount=10):
         """
@@ -475,22 +496,58 @@ class NetworkRunner:
         num = len(data_x) // amount
         return data_x[num:], data_y[num:], data_x[:num], data_y[:num]
 
-    def evaluate(self, data, data_y=None, criterion=None):
-        self.network.eval()
-        result = self.network(data)
-        if data_y:
-            loss = criterion(result, data_y)
-        self.network.train()
+    def evaluate(self, data, data_y=None, criterion=None, batched=None):
+        if self.dropout:
+            self.network.eval()
 
-        if data_y:
+        self.network.zero_grad()
+
+        # Enable GPU optimization
+        if torch.cuda.is_available():
+            self.network.cuda()
+
+        
+        if batched:
+            batches = [slice(i, i+batched) for i in range(0, data.size(0) - 1, batched) if i + batched < len(data)]
+            if batches[-1].stop < len(data):
+                batches.append(slice(batches[-1].stop, len(data)))
+
+            results = []
+            i = 0
+            print("{} batches, did: ".format(len(batches)), end='')
+            for b in batches:
+                x_ = _var(data[b])
+                results.append(self.network(x_))
+                print("{}".format(i), end=' ') 
+                i += 1
+            result = torch.cat(results, dim=0)
+            print()
+
+        else:
+            x_ = _var(data)
+            result = self.network(x_)
+
+        if data_y is not None:
+            y_ = _var(data_y).squeeze()
+            # if torch.cuda.is_available(): y_ = y_.cuda()
+            loss = criterion(result, y_)
+
+        if self.dropout:
+            self.network.train()
+
+        if data_y is not None:
             return result, loss.data[0]
         else:
             return result
 
     def train(self, epochs=50, batch_size=30, learn_rate=0.0005,
-                      lossfcn="MSELoss", opt="SGD", err="avg_err", clipgrad=0.25, interval=50, path=None):
+                      lossfcn="MSELoss", opt="SGD", err="avg_err", clipgrad=0.25, interval=50, path=None, pretrained=None):
 
-        self.network.train()
+        if pretrained:
+            self.network.load_state_dict(pretrained["model"])
+
+        if self.dropout:
+            self.network.train()
 
         # Enable GPU optimization
         if torch.cuda.is_available():
@@ -501,16 +558,24 @@ class NetworkRunner:
         optimizer = getattr(torch.optim, opt)(self.network.parameters(), lr=learn_rate)
         b = batch_size
 
-        data = {}
-        for d in ['output', "loss", "err"]:
-            data[d] = []
-        stats_per_epoch = []
+        if pretrained:
+            data = pretrained["data"]
+            stats_per_epoch = pretrained["stats_per_epoch"]
+            start = pretrained["starting_epoch"]
+        else:
+            data = {}
+            for d in ["loss", "err"]:
+                data[d] = []
+            stats_per_epoch = []
+            start = 0
 
         try:
-            for e in range(epochs):
+            for e in range(start, epochs):
                 # create batches (of random data points if not a sequence)
                 if self.seq:
                     batches = [slice(i, i+b) for i in range(0, self.x_train.size(0) - 1, b) if i + b < len(self.x_train)]
+                    if batches[-1].stop < len(self.x_train):
+                        batches.append(slice(batches[-1].stop, len(self.x_train)))
                 else:
                     inds = np.random.permutation(range(len(self.x_train)))
                     batches = [torch.LongTensor(inds[i:(i + b)]) for i in range(0, len(inds), b) if i + b < len(inds)]
@@ -519,14 +584,14 @@ class NetworkRunner:
                 stats["loss"] = [0]
                 stats[err] = []
                 for i in range(len(batches)):
-                    x_ = Variable(self.x_train[batches[i]])
-                    y_ = Variable(self.y_train[batches[i]]).squeeze()
+                    x_ = _var(self.x_train[batches[i]])
+                    y_ = _var(self.y_train[batches[i]]).squeeze()
                     # TODO: dimensions issue of y_
 
                     # Enable GPU optimization
-                    if torch.cuda.is_available():
-                        x_ = x_.cuda()
-                        y_ = y_.cuda()
+                    # if torch.cuda.is_available():
+                    #     x_ = x_.cuda()
+                    #     y_ = y_.cuda()
 
                     # Run and evaluate the network
                     y_pred = self.network(x_)
@@ -552,7 +617,7 @@ class NetworkRunner:
                     optimizer.step()
 
                     # Report and save performance for batch interval
-                    if i % interval == 0:
+                    if i % interval == 0 and i != 0:
                         # Save stats
                         stats["loss"][-1] = stats["loss"][-1] / interval
                         if err == "perplexity":
@@ -560,7 +625,7 @@ class NetworkRunner:
                         elif err == "avg_err":
                             stats[err].append(torch.mean(y_pred - y_).data[0])
 
-                        if path: self._save_data(path+"checkpoints/{}-{}-".format(e, i), stats=stats)
+                        # if path: self._save_data(path+"checkpoints/{}-{}-".format(e, i), stats=stats)
 
 
                         print("Epoch: {}\t Batch: {}/{}\t Loss: {}\t {}: {}\t".format(
@@ -569,25 +634,27 @@ class NetworkRunner:
                         stats["loss"].append(0)
 
 
-                # Save stats for epoch
-                y_pred, loss = self.evaluate(self.x_test, self.y_test, criterion)
+                # Run on test data
+                y_pred, loss = self.evaluate(self.x_test, self.y_test, criterion, batched=500)
                 if err == "perplexity":
                     error = math.exp(loss)
                 elif err == "avg_err":
-                    error = torch.mean(y_pred - self.y_test).data[0]
+                    error = torch.mean(y_pred - _var(self.y_test).squeeze()).data[0]
+
+                # Save stats for epoch
                 stats_per_epoch.append(stats)
-                data["output"].append(y_pred)
+                # data["output"].append(y_pred)
                 data["loss"].append(loss)
                 data["err"].append(error)
 
                 if path: self._save_data(path+"checkpoints/{}-{}-".format(e, i), data=data, stats_per_epoch=stats_per_epoch, model=self.network)
 
                 # Report on test data
-                print("Epoch: {}\t Loss: {}\t {}: {}\t".format(e, loss, err, error))
+                print("TEST DATA -- \t Epoch: {}\t Loss: {}\t {}: {}\t".format(e, loss, err, error))
 
 
             # Save all to file after all epochs
-            print("Saving to {}".format(path))
+            print("Finished {} epochs, saving to {}".format(epochs, path))
             if path: self._save_data(path, model=self.network, data=data, stats_per_epoch=stats_per_epoch)
 
         except KeyboardInterrupt:
@@ -612,6 +679,8 @@ class NetworkRunner:
     def _save_data(self, path, **kwargs):
         
         for key, value in kwargs.items():
+            if not os.path.exists(path[0:path.rindex("/")]):
+                os.makedirs(path[0:path.rindex("/")])
             with open(path + key, 'wb') as file:
                 if key == "model":
                     torch.save(value.state_dict(), file)
