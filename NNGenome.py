@@ -1,5 +1,5 @@
 from enum import Enum
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 
 # - Rules need for genome:
 # NO RULES FOR GENE. ONLY IN GENOME!!!!
@@ -60,8 +60,8 @@ LinearGene.__new__.__defaults__ = (None, False)
 RnnGene = namedtuple("RnnGene", BaseGene._fields + ("d_hidden", "d_batch", "num_layers", "nonlin", "bidir"))
 RnnGene.__new__.__defaults__ = (1, "tanh", False)
 
-EmbedGene = namedtuple("EmbedGene", BaseGene._fields + ("d_embed", "dropout"))
-EmbedGene.__new__.__defaults__ = (False,)
+EmbedGene = namedtuple("EmbedGene", BaseGene._fields + ("d_embed", "dropout", "max_norm"))
+EmbedGene.__new__.__defaults__ = (False, None)
 
 NodeTypes = {
             "nn_in": NNInputGene, "nn_out": NNOutputGene, "conv": ConvGene
@@ -119,7 +119,7 @@ class NNGenome:
 
     def __init__(self, genes=None):
         # Indexed by gid
-        self.allGenes = {}
+        self.allGenes = OrderedDict()
         self.counter = 1
 
         if genes:

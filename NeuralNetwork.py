@@ -284,7 +284,7 @@ class Embed(NetworkNode):
     def __init__(self, gene, input_list=(), output_list=()):
         super(Embed, self).__init__(gene, input_list, output_list)
 
-        self.node = nn.Embedding(self.G.d_embed, self.G.d_out)
+        self.node = nn.Embedding(self.G.d_embed, self.G.d_out[-1], max_norm=self.G.max_norm)
 
         if self.G.dropout:
             self.drop = nn.Dropout()
@@ -307,7 +307,7 @@ class Embed(NetworkNode):
                 in_result.append( n() )
 
             # Concatenate input along the dim "m"
-            self.result = self.drop(self.node(torch.cat(in_result, 1)))
+            self.result = self.drop(self.node(torch.cat(in_result, 1)).view(*self.G.d_out))
 
 
         return self.result
@@ -474,7 +474,7 @@ class NetworkRunner:
 
 
     # TODO: remove assumption that data is in pytorch form
-    def __init__(self, network , xtr, ytr, xte=None, yte=None, seq=False, dropout=False):
+    def __init__(self, network , xtr, ytr, xte=None, yte=None, seq=True, dropout=False):
 
         self.network = network
         self.dropout = dropout
@@ -541,7 +541,7 @@ class NetworkRunner:
             return result
 
     def train(self, epochs=50, batch_size=30, learn_rate=0.0005,
-                      lossfcn="MSELoss", opt="SGD", err="avg_err", clipgrad=0.25, interval=50, path=None, pretrained=None):
+                      lossfcn="MSELoss", opt="SGD", err="avg_err", clipgrad=0.25, interval=50, l2=0.01, path=None, pretrained=None):
 
         if pretrained:
             self.network.load_state_dict(pretrained["model"])
@@ -555,7 +555,7 @@ class NetworkRunner:
 
         # Set hyperparameters
         criterion = getattr(nn, lossfcn)()
-        optimizer = getattr(torch.optim, opt)(self.network.parameters(), lr=learn_rate)
+        optimizer = getattr(torch.optim, opt)(self.network.parameters(), lr=learn_rate, weight_decay=l2)
         b = batch_size
 
         if pretrained:
