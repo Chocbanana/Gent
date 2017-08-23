@@ -45,22 +45,22 @@ BaseGene = namedtuple("BaseGene", ["gid", "ntype", "d_in", "d_out"])
 
 NNInputGene = namedtuple("NNInputGene", BaseGene._fields)
 
-NNOutputGene = namedtuple("NNOutputGene", BaseGene._fields + ("activation",))
-NNOutputGene.__new__.__defaults__ = (None,)
+NNOutputGene = namedtuple("NNOutputGene", BaseGene._fields + ("activation", "in_activation"))
+NNOutputGene.__new__.__defaults__ = (lambda x: x, ())
 
 ConvGene = namedtuple("ConvGene", BaseGene._fields + ("d_filter", "activation", "stride", "dropout"))
-ConvGene.__new__.__defaults__ = (None, [1, 1, 1, 1], False)
+ConvGene.__new__.__defaults__ = (lambda x: x, [1, 1, 1, 1], False)
 
 PoolGene = namedtuple("PoolGene", BaseGene._fields + ("d_kernel", "activation", "stride", "padding", "dropout"))
-PoolGene.__new__.__defaults__ = (None, [1, 1, 1, 1], 0, False)
+PoolGene.__new__.__defaults__ = (lambda x: x, [1, 1, 1, 1], 0, False)
 
-LinearGene = namedtuple("LinearGene", BaseGene._fields + ("activation", "dropout"))
-LinearGene.__new__.__defaults__ = (None, False)
+LinearGene = namedtuple("LinearGene", BaseGene._fields + ("activation", "dropout", "tied"))
+LinearGene.__new__.__defaults__ = (lambda x: x, False, None)
 
-RnnGene = namedtuple("RnnGene", BaseGene._fields + ("d_hidden", "d_batch", "num_layers", "nonlin", "bidir"))
-RnnGene.__new__.__defaults__ = (1, "tanh", False)
+RnnGene = namedtuple("RnnGene", BaseGene._fields + ("d_hidden", "d_batch", "num_layers", "bidir"))
+RnnGene.__new__.__defaults__ = (1, False)
 
-EmbedGene = namedtuple("EmbedGene", BaseGene._fields + ("d_embed", "dropout", "max_norm"))
+EmbedGene = namedtuple("EmbedGene", BaseGene._fields + ("n_embed", "dropout", "max_norm"))
 EmbedGene.__new__.__defaults__ = (False, None)
 
 NodeTypes = {
@@ -88,6 +88,8 @@ allnodes = list(NodeTypes.keys())
 #     - assigning unique nids (different from gid, which identifies.... something unique)
 #         - TODO: still need to decide if gid applies jsut to ntype, or also params
 #         - also including in/output is isomorphism, since is determined by connections and gid
+#     - Check that all dims are correct
+#     - Check tied weights are correct
 class NNGenotype:
 
     def __init__(self, genes):

@@ -30,13 +30,16 @@ TODO: Later (NOT NOW!!) :
 - Documentation (properly formatted, meaning triple quote docs after class/fcns and sameline for variables)
 """
 
-def _var(tensor):
-    # Enable GPU optimization
-    if torch.cuda.is_available():
-        return Variable(tensor).cuda()
+def _var(tensor, nograd=False):
+    # Enable GPU optimization if possible
+    return Variable(tensor, volatile=nograd).cuda() if torch.cuda.is_available() else Variable(tensor, volatile=nograd)
 
-    else:
-        return Variable(tensor)
+
+
+def _tensor(t_type, val=None):
+    # Enable GPU optimization if possible
+    tensor = getattr(torch.cuda, t_type) if torch.cuda.is_available() else getattr(torch, t_type)
+    return tensor if val is None else tensor(val)
 
 
 # TODO: IMP redo for new "same" gene structure ie no recursive updating for output
@@ -101,7 +104,7 @@ class NetworkInput(NetworkNode):
         elif self.result is None:
             raise ValueError("There must be some input or a previously calculated result")
 
-        return self.result
+        return self.result.view(*self.G.d_out)
 
     # def _build_tensor(self):
     #     self.tensor = torch.Tensor()
@@ -116,29 +119,45 @@ class NetworkOutput(NetworkNode):
     def __init__(self, gene, input_list=()):
         super(NetworkOutput, self).__init__(gene, input_list=input_list)
 
-        # self.biasvar = tf.Variable(tf.constant([1.0]))
-        # self.biasvar2 = tf.Variable(tf.constant([1.0]))
-        if self.G.activation is None:
-            self.node = lambda x: x
+        # If there's a sequence of activations, then apply each one to a column/feature dim
+        if isinstance(self.G.activation, (list, tuple)):
+            assert len(self.G.activation) == self.G.d_out[-1]
+            self.act_list = []
+            for a in self.G.activation:
+                if isinstance(a, str): self.act_list.append(getattr(nn, a)())
+                else: self.act_list.append(a)
+            ndim = len(self.G.d_out) - 1
+            self.act = lambda x: torch.cat((self.act_list[i](x.select(ndim, i)) for i in range(self.G.d_out[-1])), ndim)
+
+        # Get the activation fcn if a string, or a given fcn
         else:
-            self.node = getattr(F, self.G.activation)
+            if isinstance(self.G.activation, str):
+                self.act = getattr(nn, self.G.activation)()
+            else:
+                self.act = self.G.activation
 
 
     def forward(self, input=None):
         if (input is not None) and (self.result is None):
-            self.result = self.node(input).view(*self.G.d_out)
+            self.result = self.act(input)
 
         # Pull the input from previous network layers
         elif self.result is None:
             in_result = []
-            for n in self.input:
-                in_result.append( n() )
 
-            # Concatenate input along the 3rd dim
-            # TODO: make concatenation on a given dim or default last dim
-            self.result = self.node(torch.cat(in_result, 2)).view(*self.G.d_out)
+            # Apply a separate activation to each resulting input if applicable
+            if self.G.in_activation:
+                for i, n in enumerate(self.input):
+                    in_result.append( self.G.in_activation[i](n()) )
 
-        return self.result
+            else:
+                for n in self.input:
+                    in_result.append( n() )
+
+            # Concatenate input along the lat dim
+            self.result = self.act(torch.cat(in_result, in_result[0].dim() - 1))
+
+        return self.result.view(*self.G.d_out)
 
 
 
@@ -230,9 +249,6 @@ class MaxPool(NetworkNode):
 
 
 class FullyConnected(NetworkNode):
-    gene_space = {"nodetype": ["matmul"],
-                  "input": ["conv", "recurrent", "ninput", "maxpool", "matmul"],
-                  "output": ["conv", "recurrent", "noutput", "maxpool", "matmul"]}
     """
     Required params: nodetype, activation, n_dim, m_dim
     Optional:
@@ -241,12 +257,33 @@ class FullyConnected(NetworkNode):
     def __init__(self, gene, input_list=(), output_list=()):
         super(FullyConnected, self).__init__(gene, input_list, output_list)
 
-        self.node = nn.Linear(self.G.d_in[-1], self.G.d_out)
+        self.node = nn.Linear(self.G.d_in[-1], self.G.d_out[-1])
 
-        if self.G.activation:
-            self.act = getattr(nn, self.G.activation)()
+        # if self.G.activation:
+        #     self.act = getattr(nn, self.G.activation)()
+        # else:
+        #     self.act = lambda x: x
+
+        # If there's a sequence of activations, then apply each one to a column/feature dim
+        if isinstance(self.G.activation, (list, tuple)):
+            assert len(self.G.activation) == self.G.d_out[-1]
+            self.act_list = []
+            for a in self.G.activation:
+                if isinstance(a, str): self.act_list.append(getattr(nn, a)())
+                else: self.act_list.append(a)
+            ndim = len(self.G.d_out) - 1
+
+            # print(self.act_list)
+
+            self.act = lambda x: torch.cat([self.act_list[i](col) for i, col in enumerate(torch.split(x, 1, ndim))], ndim)
+
+        # Get the activation fcn if a string, or a given fcn
         else:
-            self.act = lambda x: x
+            if isinstance(self.G.activation, str):
+                self.act = getattr(nn, self.G.activation)()
+            else:
+                self.act = self.G.activation
+
 
         if self.G.dropout:
             self.drop = nn.Dropout()
@@ -262,19 +299,20 @@ class FullyConnected(NetworkNode):
         """
         if (input is not None) and (self.result is None):
 
-            self.result = self.act(self.drop(self.node(input.view(*self.G.d_in)))).view(*list(input.size()[:-1]), self.G.d_out)
+            self.result = self.act(self.drop(self.node(input.view(*self.G.d_in))))
 
         # Pull the input from previous network layers
         elif self.result is None:
             in_result = []
             for n in self.input:
-                in_result.append(n())
+                in_result.append( n() )
 
-            input = torch.cat(in_result, 0)
-            # Concatenate input along the dim "n"
-            self.result = self.act(self.drop(self.node(input.view(*self.G.d_in)))).view(*list(input.size()[:-1]), self.G.d_out)
+            # input = torch.cat(in_result, 0)
 
-        return self.result
+            # Concatenate input along the last dim
+            self.result = self.act(self.drop(self.node(torch.cat(in_result, in_result[0].dim() - 1))))
+
+        return self.result.view(*self.G.d_out)
 
 
 
@@ -284,7 +322,7 @@ class Embed(NetworkNode):
     def __init__(self, gene, input_list=(), output_list=()):
         super(Embed, self).__init__(gene, input_list, output_list)
 
-        self.node = nn.Embedding(self.G.d_embed, self.G.d_out[-1], max_norm=self.G.max_norm)
+        self.node = nn.Embedding(self.G.n_embed, self.G.d_out[-1], max_norm=self.G.max_norm)
 
         if self.G.dropout:
             self.drop = nn.Dropout()
@@ -306,11 +344,11 @@ class Embed(NetworkNode):
             for n in self.input:
                 in_result.append( n() )
 
-            # Concatenate input along the dim "m"
-            self.result = self.drop(self.node(torch.cat(in_result, 1)).view(*self.G.d_out))
+            # Concatenate input along the last dim
+            self.result = self.drop(self.node(torch.cat(in_result, in_result[0].dim()-1).type(_tensor("LongTensor"))))
 
 
-        return self.result
+        return self.result.view(*self.G.d_out)
 
 
 class Recurrent(NetworkNode):
@@ -322,20 +360,20 @@ class Recurrent(NetworkNode):
 
         dim = self.G.num_layers if not self.G.bidir else self.G.num_layers * 2
 
-        self.hidden = _var(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
+        self.hidden = _var(torch.rand(dim, self.G.d_batch, self.G.d_out[-1]))
         if self.G.ntype == "lstm":
-            self.state = _var(torch.zeros(dim, self.G.d_batch, self.G.d_hidden))
+            self.state = _var(torch.zeros(dim, self.G.d_batch, self.G.d_out[-1]))
 
         # # Enable GPU optimization
         # if torch.cuda.is_available():
         #     self.hidden = self.hidden.cuda()
         #     if self.G.ntype == "lstm": self.state = self.state.cuda()
 
-        if self.G.ntype == "rnn":
-            self.node = Recurrent.types["rnn"](self.G.d_in, self.G.d_hidden, self.G.num_layers, self.G.nonlin,
-                                     bidirectional=self.G.bidir)
-        else:
-            self.node = Recurrent.types[self.G.ntype](self.G.d_in, self.G.d_hidden, self.G.num_layers,
+        # if self.G.ntype == "rnn":
+        #     self.node = Recurrent.types["rnn"](self.G.d_in[-1], self.G.d_out[-1], self.G.num_layers,
+        #                              bidirectional=self.G.bidir)
+        # else:
+        self.node = Recurrent.types[self.G.ntype](self.G.d_in[-1], self.G.d_out[-1], self.G.num_layers,
                                      bidirectional=self.G.bidir)
 
     def forward(self, input=None):
@@ -348,7 +386,8 @@ class Recurrent(NetworkNode):
         self._repackage()
         if (input is not None) and (self.result is None):
             if self.G.ntype == "lstm":
-                self.result, self.hidden, self.state = self.node(input, self.hidden, self.state)
+                self.result, both = self.node(input, (self.hidden, self.state))
+                self.hidden, self.state = both
             else:
                 self.result, self.hidden = self.node(input, self.hidden)
 
@@ -360,11 +399,12 @@ class Recurrent(NetworkNode):
 
             # Concatenate input along the dim input_size
             if self.G.ntype == "lstm":
-                self.result, self.hidden, self.state = self.node(torch.cat(in_result, 2), self.hidden, self.state)
+                self.result, both = self.node(torch.cat(in_result, 2), (self.hidden, self.state))
+                self.hidden, self.state = both
             else:
                 self.result, self.hidden = self.node(torch.cat(in_result, 2), self.hidden)
 
-        return self.result
+        return self.result.view(*self.G.d_out)
 
 
     def _repackage(self):
@@ -390,37 +430,46 @@ class NeuralNetwork(nn.Module):
     # NOTE: connections is a list of tuples of lists ([in], [out]) of gids, for each
     #       corresponding gene in the genes list
     # TODO: replace genes+connections with a genotype
-    def __init__(self, genes, connections, genome, inputs=(), outputs=()):
+    def __init__(self, genes, connections, inputs=(), outputs=()):
         super(NeuralNetwork, self).__init__()
 
-        self.genes = []
-        self.nodes = nn.ModuleList()
+        # self.genes = []
+        self.nodes = {}
         self.input_nodes = []
         self.output_nodes = []
 
-        for g in genes:
-            if isinstance(g, gn.GeneTypes) and g.gid in genome.allGenes:
-                self.genes.append(g)
-            elif isinstance(g, dict):
-                self.genes.append(genome.new_gene(g))
-            else:
-                raise ValueError("Given argument is not a dict or gene")
+        # for g in genes:
+        #     if isinstance(g, gn.GeneTypes) and g.gid in genome.allGenes:
+        #         self.genes.append(g)
+        #     elif isinstance(g, dict):
+        #         self.genes.append(genome.new_gene(g))
+        #     else:
+        #         raise ValueError("Given argument is not a dict or gene")
+
+        # self.genes = genes.values()
 
         # Make neural network layers (pytorch) modules for each gene
-        for g in genes:
+        for gid, g in genes.items():
 
             n = NeuralNetwork.NodeTypes[g.ntype](g)
-            self.nodes.append(n)
+            self.nodes[gid] = n
+            self.add_module(g.ntype + str(gid), n)
 
-            if g.gid in inputs: self.input_nodes.append(n)
-            if g.gid in outputs: self.output_nodes.append(n)
+            if gid in inputs: self.input_nodes.append(n)
+            if gid in outputs: self.output_nodes.append(n)
 
         # Connect the modules
-        for (i, n) in enumerate(self.nodes):
+        for i, n in self.nodes.items():
             innodes = [self.nodes[j] for j in connections[i][0]]
             outnodes = [self.nodes[j] for j in connections[i][1]]
             n.add_input(innodes)
             n.add_output(outnodes)
+
+            # Tie weights if applicable
+            if hasattr(n.G, "tied") and n.G.tied is not None:
+                assert self.nodes[n.G.tied].node.weight.size() == n.node.weight.size()
+                n.node.weight = self.nodes[n.G.tied].node.weight
+
 
         # Default behavior is to put data in the input layers, get it out from the output layers
         if not any(self.input_nodes):
@@ -430,25 +479,29 @@ class NeuralNetwork(nn.Module):
 
         # TODO: test - print (named) params, children module trees+parameters
 
-    def forward(self, input):
+    def forward(self, input, innodes=None, outnodes=None):
         """
         :param input: The input data OR assumes a list of inputs w/ same length as self.input_nodes.
         :return: The output from the network's output_nodes, in a list if there are multiple output nodes.
         """
-        if len(self.input_nodes) == 1:
-            self.input_nodes[0](input)
+
+        input_nodes = innodes if innodes else self.input_nodes
+        output_nodes = outnodes if outnodes else self.output_nodes
+
+        if len(input_nodes) == 1:
+            input_nodes[0](input)
         else:
-            for i, node in enumerate(self.input_nodes):
+            for i, node in enumerate(input_nodes):
                 node(input[i])
 
-        if len(self.output_nodes) == 1:
-            result = self.output_nodes[0]()
+        if len(output_nodes) == 1:
+            result = output_nodes[0]()
         else:
             result = []
-            for node in self.output_nodes:
+            for node in output_nodes:
                 result.append(node())
 
-        for n in self.nodes:
+        for n in self.nodes.values():
             n.result = None
 
         return result
@@ -474,11 +527,12 @@ class NetworkRunner:
 
 
     # TODO: remove assumption that data is in pytorch form
-    def __init__(self, network , xtr, ytr, xte=None, yte=None, seq=True, dropout=False):
+    def __init__(self, network , xtr, ytr, xte=None, yte=None, seq=True, dropout=False, format_fcn=None):
 
         self.network = network
         self.dropout = dropout
         self.seq = seq
+        self.format_fcn = format_fcn
 
         if xte is not None:
             self.x_train = xtr
@@ -496,7 +550,8 @@ class NetworkRunner:
         num = len(data_x) // amount
         return data_x[num:], data_y[num:], data_x[:num], data_y[:num]
 
-    def evaluate(self, data, data_y=None, criterion=None, batched=None):
+    def evaluate(self, data, data_y=None, criterion=None, batched=None, err=None):
+        # Take out of training mode, into eval mode
         if self.dropout:
             self.network.eval()
 
@@ -506,39 +561,70 @@ class NetworkRunner:
         if torch.cuda.is_available():
             self.network.cuda()
 
+        mult_in = None if len(self.network.input_nodes) <= 1 else len(self.network.input_nodes)
+        mult_out = None if len(self.network.output_nodes) <= 1 else len(self.network.output_nodes)
+        result = []
         
-        if batched:
-            batches = [slice(i, i+batched) for i in range(0, data.size(0) - 1, batched) if i + batched < len(data)]
-            if batches[-1].stop < len(data):
-                batches.append(slice(batches[-1].stop, len(data)))
-
+        # Batched input for when the sequence is too long for GPU to handle (??)
+        if batched:       
             results = []
-            i = 0
-            print("{} batches, did: ".format(len(batches)), end='')
-            for b in batches:
-                x_ = _var(data[b])
-                results.append(self.network(x_))
+            # Multi outputs
+            if mult_out:
+                for j in range(mult_out): results.append([])          
+
+            # Make batches
+            len_data = len(data[0]) if mult_in else len(data)
+            batches = [slice(i, i+batched) for i in range(0, len_data, batched) if i + batched < len_data]
+            if batches[-1].stop < len_data:
+                batches.append(slice(batches[-1].stop, len_data))
+
+            
+            print("{} batches with {} inputs, {} outputs, did: ".format(len(batches), mult_in, mult_out), end='')
+
+            for i, b in enumerate(batches):
+                x_ = [_var(x[b], True) for x in data] if mult_in else _var(data[b], True)
+
+                # Multi outputs
+                if mult_out:
+                    multi = self.network(x_)
+                    for j in range(mult_out): results[j].append(multi[j])
+                else:
+                    results.append(self.network(x_))
+
                 print("{}".format(i), end=' ') 
-                i += 1
-            result = torch.cat(results, dim=0)
+
+            y_pred = [torch.cat(r, dim=0) for r in results] if mult_out else torch.cat(results, dim=0)
             print()
 
+        # Not batching input
         else:
-            x_ = _var(data)
-            result = self.network(x_)
+            x_ = [_var(x, True) for x in data] if mult_in else _var(data, True)
+            y_pred = self.network(x_)
+        
 
+        result.append(y_pred)
+
+        # Calculate loss
         if data_y is not None:
-            y_ = _var(data_y).squeeze()
-            # if torch.cuda.is_available(): y_ = y_.cuda()
-            loss = criterion(result, y_)
+            if mult_out:
+                y_ = [_var(x, True) for x in data_y]  
+                loss = sum([criterion[i](y_pred[i], y_[i]).data[0] for i in range(len(y_))]) / mult_out
+            else:
+                y_ = _var(data_y, True)
+                loss = criterion(y_pred, y_).data[0]
 
+            result.append(loss)
+
+        # Calculate error
+        if err is not None:
+            error = self._calc_err(err, loss=loss, y_pred=y_pred, y_=y_, len=mult_out)
+            result.append(error)
+
+        # Return to training mode
         if self.dropout:
             self.network.train()
 
-        if data_y is not None:
-            return result, loss.data[0]
-        else:
-            return result
+        return result
 
     def train(self, epochs=50, batch_size=30, learn_rate=0.0005,
                       lossfcn="MSELoss", opt="SGD", err="avg_err", clipgrad=0.25, interval=50, l2=0.01, path=None, pretrained=None):
@@ -553,11 +639,17 @@ class NetworkRunner:
         if torch.cuda.is_available():
             self.network.cuda()
 
-        # Set hyperparameters
-        criterion = getattr(nn, lossfcn)()
-        optimizer = getattr(torch.optim, opt)(self.network.parameters(), lr=learn_rate, weight_decay=l2)
-        b = batch_size
+        # Use multiple losses if available
+        if isinstance(lossfcn, (list, tuple)):
+            criterion = [getattr(nn, l)() for l in lossfcn]
+        else:
+            criterion = getattr(nn, lossfcn)()
 
+        # Set the optimizer
+        optimizer = getattr(torch.optim, opt)(self.network.parameters(), lr=learn_rate, weight_decay=l2)
+        
+
+        # Init stats variables
         if pretrained:
             data = pretrained["data"]
             stats_per_epoch = pretrained["stats_per_epoch"]
@@ -569,36 +661,46 @@ class NetworkRunner:
             stats_per_epoch = []
             start = 0
 
+        bsz = batch_size
+        len_data = self.x_train[0].size(0) if len(self.network.input_nodes) > 1 else self.x_train.size(0)
+        # Start training
         try:
             for e in range(start, epochs):
                 # create batches (of random data points if not a sequence)
                 if self.seq:
-                    batches = [slice(i, i+b) for i in range(0, self.x_train.size(0) - 1, b) if i + b < len(self.x_train)]
-                    if batches[-1].stop < len(self.x_train):
-                        batches.append(slice(batches[-1].stop, len(self.x_train)))
+                    batches = [slice(i, i+bsz) for i in range(0, len_data - 1, bsz) \
+                                if i + bsz < len_data]
+                    if batches[-1].stop < len_data:
+                        batches.append(slice(batches[-1].stop, len_data))
                 else:
-                    inds = np.random.permutation(range(len(self.x_train)))
-                    batches = [torch.LongTensor(inds[i:(i + b)]) for i in range(0, len(inds), b) if i + b < len(inds)]
+                    inds = np.random.permutation(range(len_data))
+                    batches = [torch.LongTensor(inds[i:(i + bsz)]) for i in range(0, len(inds), bsz) \
+                                if i + bsz < len(inds)]
 
                 stats = {}
                 stats["loss"] = [0]
                 stats[err] = []
-                for i in range(len(batches)):
-                    x_ = _var(self.x_train[batches[i]])
-                    y_ = _var(self.y_train[batches[i]]).squeeze()
-                    # TODO: dimensions issue of y_
+                for b in range(len(batches)):
 
-                    # Enable GPU optimization
-                    # if torch.cuda.is_available():
-                    #     x_ = x_.cuda()
-                    #     y_ = y_.cuda()
+                    # Multiple inputs
+                    if len(self.network.input_nodes) > 1:
+                        x_ = [_var(x[batches[b]]) for x in self.x_train]                
+                    else:
+                        x_ = _var(self.x_train[batches[b]])
 
                     # Run and evaluate the network
                     y_pred = self.network(x_)
-                    loss = criterion(y_pred, y_)
+
+                    # Evaulate loss over multiple outputs
+                    if len(self.network.output_nodes) > 1:
+                        y_ = [_var(x[batches[b]]) for x in self.y_train]  
+                        loss = [criterion[i](y_pred[i], y_[i]) for i in range(len(y_))]
+                    else:
+                        y_ = _var(self.y_train[batches[b]])                 
+                        loss = [criterion(y_pred, y_)]
 
                     # Save stats
-                    stats["loss"][-1] += loss.data[0]
+                    stats["loss"][-1] += sum(x.data[0] for x in loss)
 
                     # Before the backward pass, use the optimizer object to zero all of the
                     # gradients for the variables it will update (which are the learnable weights
@@ -607,7 +709,10 @@ class NetworkRunner:
 
                     # Backward pass: compute gradient of the loss with respect to model
                     # parameters
-                    loss.backward(retain_variables=True)
+                    torch.autograd.backward(loss)
+                    # torch.autograd.backward(loss, create_graph=True)
+                    # loss.backward(retain_variables=True)
+
 
                     # Reduce exploding gradient problem
                     if clipgrad:
@@ -617,29 +722,36 @@ class NetworkRunner:
                     optimizer.step()
 
                     # Report and save performance for batch interval
-                    if i % interval == 0 and i != 0:
+                    if b % interval == 0:
+                    # if b % interval == 0 and b != 0:
                         # Save stats
-                        stats["loss"][-1] = stats["loss"][-1] / interval
-                        if err == "perplexity":
-                            stats[err].append(math.exp(stats["loss"][-1]))
-                        elif err == "avg_err":
-                            stats[err].append(torch.mean(y_pred - y_).data[0])
+                        avgloss = stats["loss"][-1] / interval
+                        stats["loss"][-1] = avgloss
+                        stats[err].append(self._calc_err(err, loss=avgloss, y_pred=y_pred, y_=y_, len=len(loss)))
 
-                        # if path: self._save_data(path+"checkpoints/{}-{}-".format(e, i), stats=stats)
+                        # if err == "perplexity":
+                        #     stats[err].append(math.exp(stats["loss"][-1]))
+                        # elif err == "avg_err":
+                        #     stats[err].append(torch.mean(y_pred - y_).data[0])
+
+                        # if path: self._save_data(path+"checkpoints/{}-{}-".format(e, b), stats=stats)
 
 
                         print("Epoch: {}\t Batch: {}/{}\t Loss: {}\t {}: {}\t".format(
-                                e, i, len(batches), stats["loss"][-1], err, stats[err][-1]))
+                                e, b, len(batches), avgloss, err, stats[err][-1]))
 
                         stats["loss"].append(0)
 
 
                 # Run on test data
-                y_pred, loss = self.evaluate(self.x_test, self.y_test, criterion, batched=500)
-                if err == "perplexity":
-                    error = math.exp(loss)
-                elif err == "avg_err":
-                    error = torch.mean(y_pred - _var(self.y_test).squeeze()).data[0]
+                y_pred, loss, error = self.evaluate(self.x_test, self.y_test, criterion, batched=500, err=err)
+                # y_ =  [_var(y) for y in self.y_test] if len(self.network.output_nodes) > 1 else _var(self.y_test)
+                # error = self._calc_err(err, loss=loss, y_pred=y_pred, y_=y_, 
+                #                         len=len(self.network.output_nodes))
+                # if err == "perplexity":
+                #     error = math.exp(loss)
+                # elif err == "avg_err":
+                #     error = torch.mean(y_pred - _var(self.y_test).squeeze()).data[0]
 
                 # Save stats for epoch
                 stats_per_epoch.append(stats)
@@ -647,7 +759,7 @@ class NetworkRunner:
                 data["loss"].append(loss)
                 data["err"].append(error)
 
-                if path: self._save_data(path+"checkpoints/{}-{}-".format(e, i), data=data, stats_per_epoch=stats_per_epoch, model=self.network)
+                if path: self._save_data(path+"checkpoints/epoch_{}-".format(e), data=data, stats_per_epoch=stats_per_epoch, model=self.network)
 
                 # Report on test data
                 print("TEST DATA -- \t Epoch: {}\t Loss: {}\t {}: {}\t".format(e, loss, err, error))
@@ -660,19 +772,36 @@ class NetworkRunner:
         except KeyboardInterrupt:
             print("Quitting from interrupt")
 
-            stats["loss"][-1] = stats["loss"][-1] / (interval if i % interval == 0 else i % interval)
-            if err == "perplexity":
-                stats[err].append(math.exp(stats["loss"][-1]))
-            elif err == "avg_err":
-                stats[err].append(torch.mean(y_pred - y_).data[0])
+            stats["loss"][-1] = stats["loss"][-1] / (interval if b % interval == 0 else b % interval)
+            stats[err].append(self._calc_err(err, loss=stats["loss"][-1], y_pred=y_pred, y_=y_, 
+                                len=len(self.network.output_nodes)))
+
             stats_per_epoch.append(stats)
             
             print("Saving to {}".format(path))
             if path: self._save_data(path+"interrupt/", model=self.network, data=data, stats_per_epoch=stats_per_epoch)
             print("Finished saving")
 
-        
 
+        
+    def _calc_err(self, errtype, **kwargs):
+        if errtype == "perplexity":
+            result = math.exp(kwargs["loss"])
+
+        elif errtype == "avg_err":
+            if "len" in kwargs and kwargs["len"] and kwargs["len"] > 1:
+                if self.format_fcn:
+                    y_pred = [self.format_fcn[i](kwargs["y_pred"][i]) for i in range(kwargs["len"])]
+                else: 
+                    y_pred = kwargs["y_pred"]
+
+                errs = [torch.mean((y_pred[i] - kwargs["y_"][i]).type(_tensor("FloatTensor"))).data[0] for i in range(kwargs["len"])]
+                result = sum(errs) / kwargs["len"]
+
+            else:
+                result = torch.mean((kwargs["y_pred"] - kwargs["y_"]).type(_tensor("FloatTensor"))).data[0]
+
+        return result
 
 
 
@@ -686,4 +815,4 @@ class NetworkRunner:
                     torch.save(value.state_dict(), file)
                 else:
                     pickle.dump(value, file)
-                # print("Saved {}".format(key))
+                print("Saved {}".format(key))
