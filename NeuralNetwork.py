@@ -24,6 +24,17 @@ import torch.nn.functional as F
 torch.manual_seed(1)
 
 
+
+# TODO: Remove when pytorch bugs/compatability are fixed
+# import sys, warnings, traceback, torch
+# def warn_with_traceback(message, category, filename, lineno, file=None, line=None):
+#     sys.stderr.write(warnings.formatwarning(message, category, filename, lineno, line))
+#     traceback.print_stack(sys._getframe(2))
+# warnings.showwarning = warn_with_traceback; warnings.simplefilter('always', UserWarning);
+# torch.utils.backcompat.broadcast_warning.enabled = True
+# torch.utils.backcompat.keepdim_warning.enabled = True
+
+
 """
 TODO: Later (NOT NOW!!) :
 - Type definitions
@@ -148,7 +159,7 @@ class NetworkOutput(NetworkNode):
             # Apply a separate activation to each resulting input if applicable
             if self.G.in_activation:
                 for i, n in enumerate(self.input):
-                    in_result.append( self.G.in_activation[i](n()) )
+                    in_result.append( self.G.in_activation[i](n()).type(_tensor("FloatTensor")) )
 
             else:
                 for n in self.input:
@@ -767,7 +778,7 @@ class NetworkRunner:
 
             # Save all to file after all epochs
             print("Finished {} epochs, saving to {}".format(epochs, path))
-            if path: self._save_data(path, model=self.network, data=data, stats_per_epoch=stats_per_epoch)
+            if path: self._save_data(path, model=self.network, stats=data, stats_per_epoch=stats_per_epoch)
 
         except KeyboardInterrupt:
             print("Quitting from interrupt")
@@ -779,7 +790,7 @@ class NetworkRunner:
             stats_per_epoch.append(stats)
             
             print("Saving to {}".format(path))
-            if path: self._save_data(path+"interrupt/", model=self.network, data=data, stats_per_epoch=stats_per_epoch)
+            if path: self._save_data(path+"interrupt/", model=self.network, stats=data, stats_per_epoch=stats_per_epoch)
             print("Finished saving")
 
 
@@ -795,7 +806,7 @@ class NetworkRunner:
                 else: 
                     y_pred = kwargs["y_pred"]
 
-                errs = [torch.mean((y_pred[i] - kwargs["y_"][i]).type(_tensor("FloatTensor"))).data[0] for i in range(kwargs["len"])]
+                errs = [torch.mean(y_pred[i].sub_(kwargs["y_"][i]).type(_tensor("FloatTensor"))).data[0] for i in range(kwargs["len"])]
                 result = sum(errs) / kwargs["len"]
 
             else:
