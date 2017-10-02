@@ -1,11 +1,13 @@
 # Gent
-A library for the easy construction, training, and running of artifical neural networks; built on top of pytorch.
+A library for the easy construction, training, and running of artifical neural networks, with the ability to serialize and load arbitrary network architecture definitions and pre-trained weights. Built on top of pytorch.
 
-Eventually, this library will be "An algorithm for Genetic Evolution of Network Topologies"
+**This is very much a work in progress and is being used for currently active research; expect the interface to change drastically!**
+
+Eventually, this library will be "An algorithm for Genetic Evolution of Network Topologies".
  
 ## Using Gent
 
-Only 4 steps needed to make and run a neural network:
+Only 4 steps are needed to make and run a neural network:
 ```python
 import Gent as ann
 
